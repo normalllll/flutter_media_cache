@@ -1,0 +1,22 @@
+name: flutter_media_cache
+description: An ImageProvider that caches network images in memory and on disk, trimmed by age and size, fetched over plain HTTP or any client.
+repository: https://github.com/normalllll/flutter_media_cache
+issue_tracker: https://github.com/normalllll/flutter_media_cache/issues
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.13.0
+  flutter: ">=3.47.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  crypto: ^3.0.7
+  path: ^1.9.1
+  path_provider: ^2.1.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
