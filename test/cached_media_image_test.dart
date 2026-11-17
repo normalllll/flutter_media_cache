@@ -44,6 +44,25 @@ class _Source extends MediaSource {
   }
 }
 
+/// Serves the chunks a test adds to [controller], and records whether the
+/// download was cancelled.
+class _StreamSource extends MediaSource {
+  _StreamSource(this.cacheKey);
+
+  @override
+  final String cacheKey;
+  late StreamController<MediaChunk> controller;
+  int opens = 0;
+  bool cancelled = false;
+
+  @override
+  Stream<MediaChunk> open() {
+    opens++;
+    controller = StreamController<MediaChunk>(onCancel: () => cancelled = true);
+    return controller.stream;
+  }
+}
+
 /// Resolves [image] to its first frame's size, or throws its error.
 Future<Size> _load(ImageProvider image) {
   final result = Completer<Size>();
@@ -241,5 +260,56 @@ void main() {
     expect(framed, const Size(384, 256));
     expect(filled, const Size(384, 128));
     expect(unbounded, isNull);
+  });
+
+  testWidgets('a download no one listens to any more is cancelled, kept nowhere, and fetched afresh later', (tester) async {
+    await tester.runAsync(() async {
+      png = await _png(4, 2);
+      final source = _StreamSource('dropped');
+      final image = CachedMediaImage(source, store: disk);
+      final stream = image.resolve(ImageConfiguration.empty);
+      final listener = ImageStreamListener((info, _) => info.dispose());
+      stream.addListener(listener);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(source.opens, 1);
+      source.controller.add(MediaChunk(bytes: png.sublist(0, 10), received: 10, total: png.length));
+
+      stream.removeListener(listener);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(source.cancelled, isTrue);
+      expect(PaintingBinding.instance.imageCache.statusForKey(image).untracked, isTrue);
+      expect(folder.listSync(), isEmpty);
+
+      final again = _load(CachedMediaImage(source, store: disk));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(source.opens, 2);
+      source.controller.add(MediaChunk(bytes: png, received: png.length, total: png.length));
+      unawaited(source.controller.close());
+      expect(await again, const Size(4, 2));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(kept('dropped').readAsBytesSync(), png);
+    });
+  });
+
+  testWidgets('a download still listened to elsewhere keeps going when one listener leaves', (tester) async {
+    await tester.runAsync(() async {
+      png = await _png(4, 2);
+      final source = _StreamSource('shared');
+      final leaving = CachedMediaImage(source).resolve(ImageConfiguration.empty);
+      final listener = ImageStreamListener((info, _) => info.dispose());
+      leaving.addListener(listener);
+      final staying = _load(CachedMediaImage(source));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      leaving.removeListener(listener);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(source.cancelled, isFalse);
+
+      source.controller.add(MediaChunk(bytes: png, received: png.length, total: png.length));
+      unawaited(source.controller.close());
+      expect(await staying, const Size(4, 2));
+      expect(source.opens, 1);
+    });
   });
 }

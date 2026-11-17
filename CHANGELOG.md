@@ -1,7 +1,7 @@
 ## 0.1.0
 
 - `CachedMediaImage`: an image provider over memory (Flutter's image cache or one of the caller's), a `MediaStore` and any
-  fetch, with retries, decoding to a box and kept bytes.
+  fetch, with retries, decoding to a box and kept bytes. A fetch no one listens to any more is cancelled.
 - `MediaDiskCache`: a `MediaStore` of files named by the SHA-256 of their key, written atomically, trimmed by age and size on a
   background isolate, measured and cleared for a "clear cache" control. `forApp` keeps them in the platform's place for a
   cache.

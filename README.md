@@ -81,6 +81,9 @@ Override `cacheOnDisk` to keep a source off the disk, for example images behind 
 2. **Store**: a `MediaStore`, usually a `MediaDiskCache`.
 3. **Network**: `MediaSource.open()`, retried on failure.
 
+A fetch that no one listens to any more, such as an image scrolled away before it arrived, is cancelled: the source's stream
+is cancelled, nothing is written to the store, and the image leaves the `ImageCache` so a later resolve fetches it again.
+
 An image is written to the store only after its first frame decodes. Stored files are not checked when read: a file that fails
 to decode is removed and fetched again, which costs less than checking every read.
 

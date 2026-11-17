@@ -92,15 +92,27 @@ class CachedMediaImage extends ImageProvider<CachedMediaImage> {
     if (completer != null) stream.setCompleter(completer);
   }
 
+  /// Loads the picture. When every listener but the image cache's own goes
+  /// away before the bytes are in, the fetch is cancelled and the picture
+  /// removed from [imageCache], so a later resolve fetches it afresh.
   @override
   ImageStreamCompleter loadImage(CachedMediaImage key, ImageDecoderCallback decode) {
     final chunks = StreamController<ImageChunkEvent>();
-    return MultiFrameImageStreamCompleter(
-      codec: key._load(chunks, decode),
+    final cancel = _Cancel();
+    return _CancellingCompleter(
+      codec: key._load(chunks, decode, cancel),
       scale: key.scale,
       chunkEvents: chunks.stream,
       debugLabel: key.source.description,
       informationCollector: () => <DiagnosticsNode>[DiagnosticsProperty<ImageProvider>('Image provider', key)],
+      // The image cache keeps a listener of its own on a pending picture
+      // until it completes, so a single one left then is no one else's.
+      unwatched: (listeners) => listeners == 0 || (listeners == 1 && key._cache.statusForKey(key).pending),
+      onUnwatched: () {
+        if (cancel.settled || cancel.isCancelled) return;
+        cancel.cancel();
+        key._cache.evict(key);
+      },
     );
   }
 
@@ -112,23 +124,32 @@ class CachedMediaImage extends ImageProvider<CachedMediaImage> {
 
   bool get _stored => store != null && source.cacheOnDisk;
 
-  Future<ui.Codec> _load(StreamController<ImageChunkEvent> chunks, ImageDecoderCallback decode) async {
+  Future<ui.Codec> _load(StreamController<ImageChunkEvent> chunks, ImageDecoderCallback decode, _Cancel cancel) async {
     try {
       if (_stored) {
         final kept = await store!.read(source.cacheKey);
+        cancel.check();
         if (kept != null) {
           try {
+            cancel.settled = true;
             return await _decode(kept, decode, fromDisk: true);
           } on MediaImageException {
+            cancel.settled = false;
             await store!.remove(source.cacheKey);
+            cancel.check();
           }
         }
       }
-      final bytes = await _fetch(chunks);
+      final bytes = await _fetch(chunks, cancel);
+      cancel.settled = true;
       final codec = await _decode(bytes, decode, fromDisk: false);
       if (_stored) unawaited(store!.write(source.cacheKey, bytes));
       return codec;
     } catch (error, stack) {
+      // A cancelled load has no one to tell and was already removed from the
+      // image cache, whose key may hold a new load by now. It never
+      // completes, so nothing reports it as a failure.
+      if (cancel.isCancelled) return Completer<ui.Codec>().future;
       // The image cache tracks this key only after the load starts.
       scheduleMicrotask(() => _cache.evict(this));
       Error.throwWithStackTrace(error is MediaImageException ? error : MediaImageException(source: source, stage: MediaImageStage.fetch, cause: error), stack);
@@ -163,21 +184,15 @@ class CachedMediaImage extends ImageProvider<CachedMediaImage> {
     }
   }
 
-  Future<Uint8List> _fetch(StreamController<ImageChunkEvent> chunks) async {
+  Future<Uint8List> _fetch(StreamController<ImageChunkEvent> chunks, _Cancel cancel) async {
     Object? lastError;
     StackTrace? lastStack;
     for (var attempt = 0; attempt <= retries; attempt++) {
-      final builder = BytesBuilder(copy: false);
+      cancel.check();
       try {
-        int? total;
-        await for (final chunk in source.open().timeout(timeout)) {
-          builder.add(chunk.bytes);
-          total = chunk.total ?? total;
-          chunks.add(ImageChunkEvent(cumulativeBytesLoaded: chunk.received, expectedTotalBytes: chunk.total));
-        }
-        if (builder.isEmpty) throw StateError('Empty file: expected ${total ?? 'unknown'} bytes');
-        if (total != null && builder.length != total) throw StateError('Incomplete file: ${builder.length} of $total bytes');
-        return builder.takeBytes();
+        return await _fetchOnce(chunks, cancel);
+      } on _Cancelled {
+        rethrow;
       } catch (error, stack) {
         lastError = error;
         lastStack = stack;
@@ -185,6 +200,41 @@ class CachedMediaImage extends ImageProvider<CachedMediaImage> {
       }
     }
     Error.throwWithStackTrace(lastError!, lastStack!);
+  }
+
+  /// One attempt at the bytes; [cancel] cancels the source's stream.
+  Future<Uint8List> _fetchOnce(StreamController<ImageChunkEvent> chunks, _Cancel cancel) {
+    final done = Completer<Uint8List>();
+    void fail(Object error, StackTrace stack) {
+      if (!done.isCompleted) done.completeError(error, stack);
+    }
+
+    final builder = BytesBuilder(copy: false);
+    int? total;
+    final subscription = source
+        .open()
+        .timeout(timeout)
+        .listen(
+          (chunk) {
+            builder.add(chunk.bytes);
+            total = chunk.total ?? total;
+            chunks.add(ImageChunkEvent(cumulativeBytesLoaded: chunk.received, expectedTotalBytes: chunk.total));
+          },
+          onError: fail,
+          onDone: () {
+            if (builder.isEmpty) return fail(StateError('Empty file: expected ${total ?? 'unknown'} bytes'), StackTrace.current);
+            if (total != null && builder.length != total) {
+              return fail(StateError('Incomplete file: ${builder.length} of $total bytes'), StackTrace.current);
+            }
+            if (!done.isCompleted) done.complete(builder.takeBytes());
+          },
+          cancelOnError: true,
+        );
+    cancel.onCancel = () {
+      unawaited(subscription.cancel());
+      fail(const _Cancelled(), StackTrace.current);
+    };
+    return done.future.whenComplete(() => cancel.onCancel = null);
   }
 
   @override
@@ -253,5 +303,72 @@ final class _CheckedCodec implements ui.Codec {
     _first?.image.dispose();
     _first = null;
     _codec.dispose();
+  }
+}
+
+/// Whether anyone still waits for a load's bytes, and how to stop fetching
+/// them.
+final class _Cancel {
+  bool isCancelled = false;
+
+  /// The bytes are in and being decoded; nothing is left to cancel.
+  bool settled = false;
+
+  /// Stops the fetch running now, if any.
+  void Function()? onCancel;
+
+  void cancel() {
+    isCancelled = true;
+    final stop = onCancel;
+    onCancel = null;
+    stop?.call();
+  }
+
+  void check() {
+    if (isCancelled) throw const _Cancelled();
+  }
+}
+
+final class _Cancelled implements Exception {
+  const _Cancelled();
+
+  @override
+  String toString() => 'Cancelled: no one is waiting for the picture any more';
+}
+
+/// Calls [onUnwatched] each time a removed listener leaves the listeners
+/// [unwatched] counts as no one.
+final class _CancellingCompleter extends MultiFrameImageStreamCompleter {
+  _CancellingCompleter({
+    required super.codec,
+    required super.scale,
+    super.chunkEvents,
+    super.debugLabel,
+    super.informationCollector,
+    required this.unwatched,
+    required this.onUnwatched,
+  });
+
+  final bool Function(int listeners) unwatched;
+  final VoidCallback onUnwatched;
+  final _listening = <ImageStreamListener>[];
+
+  @override
+  void addListener(ImageStreamListener listener) {
+    // Counted first: a listener added to a finished picture may remove
+    // itself before addListener returns.
+    _listening.add(listener);
+    try {
+      super.addListener(listener);
+    } catch (_) {
+      _listening.remove(listener);
+      rethrow;
+    }
+  }
+
+  @override
+  void removeListener(ImageStreamListener listener) {
+    super.removeListener(listener);
+    if (_listening.remove(listener) && unwatched(_listening.length)) onUnwatched();
   }
 }
