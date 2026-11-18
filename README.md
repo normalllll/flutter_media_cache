@@ -139,15 +139,43 @@ LayoutBuilder(
 The box is rounded up in steps, so resizing a window does not decode again at every width. Each box is an image of its own in
 both caches: use it where an image is shown at one size, not for one shown elsewhere at other sizes.
 
+## Download limit
+
+Downloads run through `MediaDownloadSlots`, 12 at once by default (`MediaDownloadSlots.shared`). Pictures fetched over one
+HTTP/2 connection share it and all finish together, so past a few at once more downloads finish none of them sooner. A request
+over the limit waits, the newest first: in a scrolling list the newest requests are the pictures now on screen. A picture
+scrolled away while it waits never opens its source. A download fails when no data arrives for `timeout`; the clock starts
+when the download gets its slot, not when it queued. Disk reads never wait for a slot. Pass `slots` to use a limit of your own for one kind of image.
+
+`MediaSource.shouldRetry` returns false for an error another try cannot fix (a sign-in or a rejected request), and the load then
+fails at once instead of using its `retries`.
+
+## Progressive previews
+
+With `progressive: true`, a progressive JPEG is shown scan by scan while it downloads, each preview decoded at the same size as
+the final picture (`decodeBox`). A scan worker on a background isolate finds the scans, so the main isolate does no parsing.
+Other formats, and baseline JPEGs, show no previews. The file is written to the store only after it has downloaded and decoded
+in full: a JPEG that stops before its end marker is never stored (bytes after the marker are fine). The scan worker starts
+when the download gets its slot. Unwatching the picture cancels the download and the worker.
+
+## Animation and decoded memory
+
+`firstFrameOnly` plays only the first frame of an animated picture: the codec reports one frame and decodes no other.
+`retainDecoded: false` removes the decoded picture from its `ImageCache` when its last listener goes, so pictures that are off
+screen hold no pixels; the encoded file stays in the store and is decoded again when the picture is shown next.
+
 ## Settings
 
 | Where | Setting | Default |
 |---|---|---|
 | `CachedMediaImage` | `store` | none: memory only |
 | | `imageCache` | Flutter's shared image cache |
-| | `retries`, `timeout`, `retryDelay` | 2 retries, 45 s per fetch, 120 ms doubling |
+| | `retries`, `timeout`, `retryDelay` | 2 retries, 45 s without data, 120 ms doubling |
 | | `decodeBox`, `decodeFit` | full size; `BoxFit.contain` |
 | | `scale`, `reloadRevision`, `keepBytes` | 1, 0, off |
+| | `firstFrameOnly`, `retainDecoded`, `progressive` | off, on, off |
+| | `slots` | `MediaDownloadSlots.shared`: 12 downloads at once |
+| `MediaSource` | `shouldRetry` | every error is retried |
 | `MediaDiskCache` | directory | `forApp`, or any `directory` function |
 | | `maxBytes`, `trimmedShare`, `maxAge` | 512 MB, trimmed to 60 %, 14 days unopened |
 | | `unfinishedMaxAge` | 1 hour |

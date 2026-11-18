@@ -3,7 +3,7 @@ description: An ImageProvider that caches network images in memory and on disk, 
 repository: https://github.com/normalllll/flutter_media_cache
 issue_tracker: https://github.com/normalllll/flutter_media_cache/issues
 publish_to: none
-version: 0.1.0
+version: 0.2.0
 
 environment:
   sdk: ^3.13.0

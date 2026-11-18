@@ -31,6 +31,11 @@ abstract class MediaSource {
   /// Fetches the bytes. Called again for each retry.
   Stream<MediaChunk> open();
 
+  /// Whether a fetch that failed with [error] is worth trying again. Return
+  /// false for errors another try cannot fix, such as a sign-in or a request
+  /// the server rejects: the load then fails at once.
+  bool shouldRetry(Object error) => true;
+
   /// How the source reads in diagnostics and error messages; never
   /// credentials or signed addresses.
   String get description => cacheKey;
