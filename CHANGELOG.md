@@ -1,3 +1,8 @@
+## Unreleased
+
+- A listener added again to a finished progressive picture gets it once, inside `addListener`, instead of a second time as if
+  it had just arrived.
+
 ## 0.2.0
 
 - Downloads now run at most 12 at once by default, through `MediaDownloadSlots`; the newest waiting request starts first and

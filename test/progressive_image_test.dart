@@ -136,6 +136,43 @@ void main() {
     }
   });
 
+  test('a listener returning to a finished picture gets it once, synchronously', () async {
+    final bytes = File('test/fixtures/progressive.jpg').readAsBytesSync();
+    final source = _ControlledSource('returning', Stream.value(MediaChunk(bytes: bytes, received: bytes.length, total: bytes.length)));
+    final provider = CachedMediaImage(source, progressive: true, decodeBox: _box, retries: 0);
+    final first = provider.resolve(ImageConfiguration.empty);
+    final finished = Completer<void>();
+    final listener = ImageStreamListener((info, _) {
+      info.dispose();
+      if ((first.completer! as ProgressiveImageStreamCompleter).complete && !finished.isCompleted) finished.complete();
+    });
+    first.addListener(listener);
+    try {
+      await finished.future.timeout(const Duration(seconds: 10));
+      // Let the final frame settle before the only viewer leaves.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    } finally {
+      first.removeListener(listener);
+    }
+
+    final calls = <bool>[];
+    final again = provider.resolve(ImageConfiguration.empty);
+    expect(again.completer, same(first.completer));
+    final returning = ImageStreamListener((info, synchronousCall) {
+      info.dispose();
+      calls.add(synchronousCall);
+    });
+    again.addListener(returning);
+    try {
+      expect(calls, [true]);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(calls, [true]);
+    } finally {
+      again.removeListener(returning);
+      await provider.evict();
+    }
+  });
+
   test('the last listener leaving stops preview frames, the download and the store write', () async {
     final fixture = await _SlowFixture.open('progressive.jpg');
     addTearDown(fixture.close);

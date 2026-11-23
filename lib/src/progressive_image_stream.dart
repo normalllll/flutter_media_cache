@@ -30,7 +30,7 @@ final class ProgressiveImageStreamCompleter extends ImageStreamCompleter with Wa
   ImageStreamListener? _finalListener;
   ImageStreamCompleterHandle? _finalHandle;
   late final StreamSubscription<ImageChunkEvent> _chunks;
-  bool _disposed = false, _finalListening = false;
+  bool _disposed = false, _finalListening = false, _resuming = false;
 
   bool get complete => loading.complete;
 
@@ -46,7 +46,17 @@ final class ProgressiveImageStreamCompleter extends ImageStreamCompleter with Wa
       _finalStream = stream;
       _finalHandle = stream.keepAlive();
       final listener = ImageStreamListener(
-        (image, _) => setImage(image),
+        (image, synchronousCall) {
+          // Re-attaching replays the final stream's current frame at once.
+          // This completer already holds that frame and has just given it to
+          // the returning listener; passing it on would repeat it as if it
+          // were new and outside the listener's addListener call.
+          if (synchronousCall && _resuming) {
+            image.dispose();
+            return;
+          }
+          setImage(image);
+        },
         onError: (Object error, StackTrace? stack) => reportError(exception: error, stack: stack, context: ErrorDescription('decoding a complete image')),
       );
       _finalListener = listener;
@@ -70,7 +80,12 @@ final class ProgressiveImageStreamCompleter extends ImageStreamCompleter with Wa
     super.addListener(listener);
     if (resume) {
       _finalListening = true;
-      _finalStream!.addListener(_finalListener!);
+      _resuming = true;
+      try {
+        _finalStream!.addListener(_finalListener!);
+      } finally {
+        _resuming = false;
+      }
     }
   }
 
